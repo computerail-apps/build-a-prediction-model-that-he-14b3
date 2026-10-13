@@ -13,7 +13,7 @@ export function CategoryFilter({ categories, active, onChange }: CategoryFilterP
         <Button
           key={c}
           size="sm"
-          variant={active === c ? 'default' : 'outline'}
+          variant={active === c ? 'primary' : 'outline'}
           onClick={() => onChange(c)}
           className="transition-colors duration-150"
         >

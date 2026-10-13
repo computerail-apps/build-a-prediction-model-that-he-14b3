@@ -2,26 +2,28 @@ import { useQuery } from '@tanstack/react-query';
 import { useBackendReady } from './backend-status';
 
 export interface UseAppDataArgs<T> {
-  key: string;
-  mock: T;
+  key: string | readonly unknown[];
+  mock?: T;
   fetchLive: () => Promise<T>;
+  enabled?: boolean;
 }
 
-export function useAppData<T>({ key, mock, fetchLive }: UseAppDataArgs<T>) {
+export function useAppData<T>({ key, mock, fetchLive, enabled = true }: UseAppDataArgs<T>) {
   const ready = useBackendReady();
   const q = useQuery({
     queryKey: ['app-data', key, ready],
     queryFn: fetchLive,
-    enabled: ready,
+    enabled: ready && enabled,
   });
-  // Deliberately no placeholderData option here — TanStack Query's
-  // generic placeholderData typing fights a caller-supplied generic T.
-  // The fallback below already covers it: mock renders until `ready`
-  // flips true AND the first live fetch resolves.
+  const data: T | undefined = ready ? (q.data ?? mock) : mock;
+  const isLoading = !ready
+    ? mock === undefined && enabled
+    : q.isFetching && q.data === undefined;
   return {
-    data: ready ? (q.data ?? mock) : mock,
+    data,
     isLive: ready && q.isSuccess,
-    isLoading: ready && q.isLoading,
+    isLoading,
+    isFetching: ready && q.isFetching,
     error: ready ? q.error : null,
     refetch: q.refetch,
   };
