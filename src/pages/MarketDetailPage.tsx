@@ -1,90 +1,100 @@
-import { useMemo } from 'react';
+import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAppData } from '@/lib/data';
+import { fetchMarket, fetchCandlesticks, fetchOrderbook, type Market, type Candle, type Orderbook } from '@/lib/kalshi';
+import { computeModelProbability, computeEdge } from '@/lib/model';
+import { supabase } from '@/lib/supabase';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/lib/ui/Card';
-import { Button } from '@/lib/ui/Button';
 import { Badge } from '@/lib/ui/Badge';
+import { Button } from '@/lib/ui/Button';
+import { Input } from '@/lib/ui/Input';
 import { CenteredSpinner } from '@/lib/ui/Spinner';
 import { Alert, AlertTitle, AlertDescription } from '@/lib/ui/Alert';
-import { EmptyState } from '@/lib/ui/EmptyState';
+import { ArrowLeft, Star, Check } from 'lucide-react';
 import { PriceChart } from '@/components/PriceChart';
 import { OrderBookPanel } from '@/components/OrderBookPanel';
 import { ProbabilityCards } from '@/components/ProbabilityCards';
-import { MOCK_MARKETS, type Market } from '@/data/mockMarkets';
-import { MOCK_CANDLES } from '@/data/mockCandles';
-import { computeModelProbability, computeEdge, buildOrderBook, type Candle } from '@/lib/model';
-import { useWatchlistStore } from '@/store/watchlistStore';
-import { ArrowLeft, BookmarkPlus, BookmarkCheck, ChevronLeft } from 'lucide-react';
 
 export function MarketDetailPage() {
   const { ticker } = useParams<{ ticker: string }>();
-  const watchlist = useWatchlistStore();
-  const isSaved = useMemo(() => watchlist.items.some((i) => i.ticker === ticker), [watchlist.items, ticker]);
+  const qc = useQueryClient();
+  const [notes, setNotes] = useState('');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const { data: market, isLoading, error, refetch } = useAppData<Market | null>({
-    key: `kalshi-market-${ticker}`,
-    mock: MOCK_MARKETS.find((m) => m.ticker === ticker) ?? null,
-    fetchLive: async () => {
-      throw new Error('not wired yet');
-    },
+  const marketQuery = useAppData<Market>({
+    key: ['kalshi-market', ticker],
+    fetchLive: () => fetchMarket(ticker!),
+    enabled: !!ticker,
   });
 
-  const { data: candles } = useAppData<Candle[]>({
-    key: `kalshi-candles-${ticker}`,
-    mock: MOCK_CANDLES[ticker ?? ''] ?? [],
-    fetchLive: async () => {
-      throw new Error('not wired yet');
-    },
+  const candlesQuery = useAppData<Candle[]>({
+    key: ['kalshi-candles', ticker, marketQuery.data?.seriesTicker],
+    fetchLive: () => fetchCandlesticks(marketQuery.data!.seriesTicker, ticker!),
+    enabled: !!ticker && !!marketQuery.data,
   });
 
-  if (isLoading) {
-    return <CenteredSpinner label="Loading market" />;
-  }
+  const orderbookQuery = useAppData<Orderbook>({
+    key: ['kalshi-orderbook', ticker],
+    fetchLive: () => fetchOrderbook(ticker!),
+    enabled: !!ticker,
+  });
 
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>Couldn't load market</AlertTitle>
-        <AlertDescription className="flex items-center justify-between gap-4">
-          <span>{(error as Error).message}</span>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>Retry</Button>
-        </AlertDescription>
-      </Alert>
-    );
-  }
+  const market = marketQuery.data;
+  const model = market
+    ? computeModelProbability({
+        lastPrice: market.lastPrice,
+        yesBid: market.yesBid,
+        yesAsk: market.yesAsk,
+        candles: candlesQuery.data,
+      })
+    : 0;
+  const marketProb = market ? market.lastPrice / 100 : 0;
+  const edge = market ? computeEdge(model, marketProb) : 0;
 
-  if (!market) {
-    return (
-      <EmptyState
-        icon={<ChevronLeft size={20} />}
-        title="Market not found"
-        description="This ticker isn't in the current market list."
-        action={<Link to="/markets"><Button size="sm"><ArrowLeft size={14} />Back to markets</Button></Link>}
-      />
-    );
-  }
-
-  const safeCandles = candles ?? [];
-  const model = computeModelProbability(market.lastPrice, safeCandles);
-  const marketProb = market.lastPrice / 100;
-  const edge = computeEdge(model, marketProb);
-  const book = buildOrderBook(market.ticker, market.yesBid, market.yesAsk);
-
-  function handleSave() {
+  async function handleSave() {
     if (!market) return;
-    if (isSaved) {
-      watchlist.remove(market.ticker);
-    } else {
-      watchlist.add({
+    setSaveState('saving');
+    setSaveError(null);
+    try {
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      if (userError || !userData.user) {
+        throw new Error('Sign in to save markets to your watchlist.');
+      }
+      const { error } = await supabase.from('build_a_prediction_m_watchlist').insert({
+        user_id: userData.user.id,
         ticker: market.ticker,
         title: market.title,
-        notes: null,
+        notes: notes.trim() || null,
         last_model_probability: model,
         last_market_probability: marketProb,
         last_edge: edge,
         last_checked_at: new Date().toISOString(),
       });
+      if (error) throw error;
+      setSaveState('saved');
+      qc.invalidateQueries({ queryKey: ['watchlist'] });
+    } catch (e) {
+      setSaveState('error');
+      setSaveError((e as Error).message);
     }
+  }
+
+  if (marketQuery.isLoading) {
+    return <CenteredSpinner label="Loading market" />;
+  }
+
+  if (marketQuery.error || !market) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Couldn't load this market</AlertTitle>
+        <AlertDescription className="flex items-center justify-between gap-4">
+          <span>{(marketQuery.error as Error)?.message ?? 'Market not found.'}</span>
+          <Button size="sm" variant="outline" onClick={() => marketQuery.refetch()}>Retry</Button>
+        </AlertDescription>
+      </Alert>
+    );
   }
 
   return (
@@ -93,41 +103,78 @@ export function MarketDetailPage() {
         <ArrowLeft size={14} />Back to markets
       </Link>
 
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">{market.category}</Badge>
-            <span className="font-mono text-micro text-muted-foreground">{market.ticker}</span>
-          </div>
-          <h1 className="text-h1">{market.title}</h1>
-          <p className="text-small text-muted-foreground">
-            Closes {new Date(market.closeTime).toLocaleString()} &middot; Open interest {market.openInterest.toLocaleString()}
-          </p>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">{market.category}</Badge>
+          <span className="font-mono text-micro text-muted-foreground">{market.ticker}</span>
         </div>
-        <Button onClick={handleSave} variant={isSaved ? 'outline' : 'default'}>
-          {isSaved ? <BookmarkCheck size={16} /> : <BookmarkPlus size={16} />}
-          {isSaved ? 'Saved to watchlist' : 'Save to watchlist'}
-        </Button>
+        <h1 className="text-h1">{market.title}</h1>
+        <p className="text-body text-muted-foreground">
+          Closes {new Date(market.closeTime).toLocaleString()}
+        </p>
       </div>
 
-      <ProbabilityCards modelProb={model} marketProb={marketProb} edge={edge} />
+      <ProbabilityCards modelProbability={model} marketProbability={marketProb} edge={edge} />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Price history</CardTitle>
-              <CardDescription>Hourly candlestick closes, last 30 periods</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <PriceChart candles={safeCandles} />
-            </CardContent>
-          </Card>
-        </div>
-        <div>
-          <OrderBookPanel book={book} />
-        </div>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Price history</CardTitle>
+          <CardDescription>Hourly candlestick closes over the last week.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {candlesQuery.isLoading ? (
+            <CenteredSpinner label="Loading candlesticks" />
+          ) : candlesQuery.error ? (
+            <Alert variant="destructive">
+              <AlertTitle>Couldn't load price history</AlertTitle>
+              <AlertDescription className="flex items-center justify-between gap-4">
+                <span>{(candlesQuery.error as Error).message}</span>
+                <Button size="sm" variant="outline" onClick={() => candlesQuery.refetch()}>Retry</Button>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <PriceChart candles={candlesQuery.data ?? []} />
+          )}
+        </CardContent>
+      </Card>
+
+      {orderbookQuery.isLoading ? (
+        <CenteredSpinner label="Loading order book" />
+      ) : orderbookQuery.error ? (
+        <Alert variant="destructive">
+          <AlertTitle>Couldn't load order book</AlertTitle>
+          <AlertDescription className="flex items-center justify-between gap-4">
+            <span>{(orderbookQuery.error as Error).message}</span>
+            <Button size="sm" variant="outline" onClick={() => orderbookQuery.refetch()}>Retry</Button>
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <OrderBookPanel orderbook={orderbookQuery.data} />
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Save to watchlist</CardTitle>
+          <CardDescription>Track this market's edge over time. Requires sign-in.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Input
+            placeholder="Optional notes"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+          {saveState === 'error' && saveError && (
+            <Alert variant="destructive">
+              <AlertTitle>Couldn't save</AlertTitle>
+              <AlertDescription>{saveError}</AlertDescription>
+            </Alert>
+          )}
+          <Button onClick={handleSave} disabled={saveState === 'saving'}>
+            {saveState === 'saved' ? <Check size={16} /> : <Star size={16} />}
+            {saveState === 'saved' ? 'Saved to watchlist' : saveState === 'saving' ? 'Saving...' : 'Save to watchlist'}
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   );
 }

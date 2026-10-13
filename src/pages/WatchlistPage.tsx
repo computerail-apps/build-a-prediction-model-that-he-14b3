@@ -1,135 +1,182 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useAppData } from '@/lib/data';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '@/lib/supabase';
+import { fetchMarket } from '@/lib/kalshi';
+import { computeModelProbability, computeEdge } from '@/lib/model';
 import { Card, CardContent } from '@/lib/ui/Card';
 import { Button } from '@/lib/ui/Button';
 import { Input } from '@/lib/ui/Input';
-import { Badge } from '@/lib/ui/Badge';
 import { EmptyState } from '@/lib/ui/EmptyState';
 import { CenteredSpinner } from '@/lib/ui/Spinner';
 import { Alert, AlertTitle, AlertDescription } from '@/lib/ui/Alert';
 import { EdgeBadge } from '@/components/EdgeBadge';
-import { useWatchlistStore } from '@/store/watchlistStore';
-import { MOCK_MARKETS, type Market } from '@/data/mockMarkets';
-import { MOCK_CANDLES } from '@/data/mockCandles';
-import { computeModelProbability, computeEdge } from '@/lib/model';
-import { Star, Trash2, RefreshCcw, Save } from 'lucide-react';
+import { Star, Trash2, LogIn } from 'lucide-react';
+
+interface WatchlistRow {
+  id: string;
+  ticker: string;
+  title: string;
+  notes: string | null;
+  last_model_probability: number | null;
+  last_market_probability: number | null;
+  last_edge: number | null;
+  last_checked_at: string | null;
+}
+
+function useUser() {
+  return useQuery({
+    queryKey: ['auth-user'],
+    queryFn: async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (error) throw error;
+      return data.user;
+    },
+    staleTime: 60_000,
+  });
+}
 
 export function WatchlistPage() {
-  const watchlist = useWatchlistStore();
-  const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
+  const qc = useQueryClient();
+  const { data: user, isLoading: userLoading } = useUser();
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
 
-  const { data: liveMarkets, isLoading, error, refetch } = useAppData<Market[]>({
-    key: 'kalshi-markets-for-watchlist',
-    mock: MOCK_MARKETS,
-    fetchLive: async () => {
-      throw new Error('not wired yet');
+  const watchlistQuery = useQuery({
+    queryKey: ['watchlist', user?.id],
+    enabled: !!user,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('build_a_prediction_m_watchlist')
+        .select('id,ticker,title,notes,last_model_probability,last_market_probability,last_edge,last_checked_at')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const rows = (data ?? []) as WatchlistRow[];
+      const refreshed = await Promise.all(
+        rows.map(async (row) => {
+          try {
+            const market = await fetchMarket(row.ticker);
+            const model = computeModelProbability({ lastPrice: market.lastPrice, yesBid: market.yesBid, yesAsk: market.yesAsk });
+            const marketProb = market.lastPrice / 100;
+            const edge = computeEdge(model, marketProb);
+            return { ...row, last_model_probability: model, last_market_probability: marketProb, last_edge: edge, live: true as const };
+          } catch {
+            return { ...row, live: false as const };
+          }
+        }),
+      );
+      return refreshed;
     },
   });
 
-  const rows = useMemo(() => {
-    return watchlist.items.map((item) => {
-      const market = (liveMarkets ?? []).find((m) => m.ticker === item.ticker);
-      if (!market) {
-        return { item, market: null, model: item.last_model_probability ?? 0, marketProb: item.last_market_probability ?? 0, edge: item.last_edge ?? 0 };
-      }
-      const candles = MOCK_CANDLES[market.ticker] ?? [];
-      const model = computeModelProbability(market.lastPrice, candles);
-      const marketProb = market.lastPrice / 100;
-      const edge = computeEdge(model, marketProb);
-      return { item, market, model, marketProb, edge };
-    });
-  }, [watchlist.items, liveMarkets]);
+  const removeMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from('build_a_prediction_m_watchlist').delete().eq('id', id);
+      if (error) throw error;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
+  });
 
-  function saveNotes(ticker: string) {
-    const value = editingNotes[ticker];
-    if (value !== undefined) {
-      watchlist.updateNotes(ticker, value);
-      setEditingNotes((prev) => {
-        const next = { ...prev };
-        delete next[ticker];
-        return next;
-      });
-    }
+  const updateNotesMutation = useMutation({
+    mutationFn: async ({ id, notes }: { id: string; notes: string }) => {
+      const { error } = await supabase.from('build_a_prediction_m_watchlist').update({ notes }).eq('id', id);
+      if (error) throw error;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
+  });
+
+  if (userLoading) {
+    return <CenteredSpinner label="Checking session" />;
+  }
+
+  if (!user) {
+    return (
+      <EmptyState
+        icon={<LogIn size={20} />}
+        title="Sign in to view your watchlist"
+        description="Saved markets and their tracked edge appear here once you're signed in via Supabase auth."
+      />
+    );
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-2">
-          <h1 className="text-h1">Watchlist</h1>
-          <p className="text-body text-muted-foreground">Saved markets with live-refreshed model edge.</p>
-        </div>
-        <Button variant="ghost" size="sm" onClick={() => refetch()}>
-          <RefreshCcw size={14} />Refresh prices
-        </Button>
+      <div className="space-y-2">
+        <h1 className="text-h1">Watchlist</h1>
+        <p className="text-body text-muted-foreground">
+          Saved markets, refreshed against live Kalshi prices on load.
+        </p>
       </div>
 
-      {isLoading ? (
-        <CenteredSpinner label="Refreshing live prices" />
-      ) : error ? (
+      {watchlistQuery.isLoading ? (
+        <CenteredSpinner label="Loading your watchlist" />
+      ) : watchlistQuery.error ? (
         <Alert variant="destructive">
-          <AlertTitle>Couldn't refresh watchlist</AlertTitle>
+          <AlertTitle>Couldn't load watchlist</AlertTitle>
           <AlertDescription className="flex items-center justify-between gap-4">
-            <span>{(error as Error).message}</span>
-            <Button size="sm" variant="outline" onClick={() => refetch()}>Retry</Button>
+            <span>{(watchlistQuery.error as Error).message}</span>
+            <Button size="sm" variant="outline" onClick={() => watchlistQuery.refetch()}>Retry</Button>
           </AlertDescription>
         </Alert>
-      ) : rows.length === 0 ? (
+      ) : !watchlistQuery.data || watchlistQuery.data.length === 0 ? (
         <EmptyState
           icon={<Star size={20} />}
           title="No saved markets yet"
-          description="Browse markets and save the ones you want to track."
-          action={<Link to="/markets"><Button size="sm">Browse markets</Button></Link>}
+          description="Browse markets and click Save to Watchlist on a market detail page."
         />
       ) : (
         <div className="space-y-4">
-          {rows.map(({ item, market, model, marketProb, edge }) => (
-            <Card key={item.ticker}>
-              <CardContent className="space-y-4 p-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="space-y-1">
-                    <Link to={`/markets/${item.ticker}`} className="text-body font-medium text-foreground transition-colors hover:text-primary">
-                      {item.title}
+          {watchlistQuery.data.map((row) => (
+            <Card key={row.id}>
+              <CardContent className="space-y-3 p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <Link to={`/markets/${row.ticker}`} className="text-body text-foreground transition-colors hover:text-primary">
+                      {row.title}
                     </Link>
-                    <div className="font-mono text-micro text-muted-foreground">{item.ticker}</div>
+                    <div className="font-mono text-micro text-muted-foreground">{row.ticker}</div>
+                    {!('live' in row) || !(row as { live?: boolean }).live ? null : null}
                   </div>
-                  <Button variant="ghost" size="sm" onClick={() => watchlist.remove(item.ticker)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeMutation.mutate(row.id)}
+                    disabled={removeMutation.isPending}
+                  >
                     <Trash2 size={14} />Remove
                   </Button>
                 </div>
-
-                <div className="grid grid-cols-3 gap-4 rounded-lg bg-surface-elevated p-4">
+                <div className="flex flex-wrap items-center gap-6">
                   <div>
                     <div className="text-micro uppercase tracking-wide text-muted-foreground">Model</div>
-                    <div className="font-mono text-body tabular-nums">{(model * 100).toFixed(1)}%</div>
+                    <div className="font-mono text-small tabular-nums">
+                      {row.last_model_probability != null ? `${(row.last_model_probability * 100).toFixed(1)}%` : '--'}
+                    </div>
                   </div>
                   <div>
                     <div className="text-micro uppercase tracking-wide text-muted-foreground">Market</div>
-                    <div className="font-mono text-body tabular-nums">{(marketProb * 100).toFixed(1)}%</div>
+                    <div className="font-mono text-small tabular-nums">
+                      {row.last_market_probability != null ? `${(row.last_market_probability * 100).toFixed(1)}%` : '--'}
+                    </div>
                   </div>
                   <div>
-                    <div className="text-micro uppercase tracking-wide text-muted-foreground">Edge</div>
-                    <EdgeBadge edge={edge} />
+                    <div className="mb-1 text-micro uppercase tracking-wide text-muted-foreground">Edge</div>
+                    {row.last_edge != null ? <EdgeBadge edge={row.last_edge} /> : <span className="text-small text-muted-foreground">--</span>}
                   </div>
                 </div>
-
-                {!market && (
-                  <Badge variant="outline" className="text-micro">Live price unavailable, showing last recorded values</Badge>
-                )}
-
-                <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                <div className="flex gap-2">
                   <Input
                     placeholder="Add a note"
-                    value={editingNotes[item.ticker] ?? item.notes ?? ''}
-                    onChange={(e) => setEditingNotes((prev) => ({ ...prev, [item.ticker]: e.target.value }))}
+                    value={noteDrafts[row.id] ?? row.notes ?? ''}
+                    onChange={(e) => setNoteDrafts((prev) => ({ ...prev, [row.id]: e.target.value }))}
                   />
-                  <Button size="sm" variant="outline" onClick={() => saveNotes(item.ticker)} disabled={editingNotes[item.ticker] === undefined}>
-                    <Save size={14} />Save note
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateNotesMutation.mutate({ id: row.id, notes: noteDrafts[row.id] ?? row.notes ?? '' })}
+                    disabled={updateNotesMutation.isPending}
+                  >
+                    Save note
                   </Button>
-                </div>
-                <div className="text-micro text-muted-foreground">
-                  Last checked {item.last_checked_at ? new Date(item.last_checked_at).toLocaleString() : 'never'}
                 </div>
               </CardContent>
             </Card>

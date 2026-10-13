@@ -1,55 +1,37 @@
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/lib/ui/Card';
-import { EdgeBadge } from './EdgeBadge';
-import { Gauge, Target, Zap } from 'lucide-react';
+import { Card, CardHeader, CardTitle, CardContent } from '@/lib/ui/Card';
+import { EdgeBadge } from '@/components/EdgeBadge';
 
-export function ProbabilityCards({
-  modelProb,
-  marketProb,
-  edge,
-}: {
-  modelProb: number;
-  marketProb: number;
+interface ProbabilityCardsProps {
+  modelProbability: number;
+  marketProbability: number;
   edge: number;
-}) {
+}
+
+export function ProbabilityCards({ modelProbability, marketProbability, edge }: ProbabilityCardsProps) {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-small">
-            <Gauge size={16} />Model probability
-          </CardTitle>
+          <CardTitle className="text-small text-muted-foreground">Model probability</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-1">
-          <div className="text-display tabular-nums">{(modelProb * 100).toFixed(1)}%</div>
-          <CardDescription>Blend of last price, VWAP mid, and momentum</CardDescription>
+        <CardContent>
+          <div className="font-mono text-h2 tabular-nums text-foreground">{(modelProbability * 100).toFixed(1)}%</div>
         </CardContent>
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-small">
-            <Target size={16} />Market probability
-          </CardTitle>
+          <CardTitle className="text-small text-muted-foreground">Market-implied</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-1">
-          <div className="text-display tabular-nums">{(marketProb * 100).toFixed(1)}%</div>
-          <CardDescription>Implied by current last traded price</CardDescription>
+        <CardContent>
+          <div className="font-mono text-h2 tabular-nums text-foreground">{(marketProbability * 100).toFixed(1)}%</div>
         </CardContent>
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-small">
-            <Zap size={16} />Edge
-          </CardTitle>
+          <CardTitle className="text-small text-muted-foreground">Edge</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <EdgeBadge edge={edge} />
-          <CardDescription>
-            {edge > 0
-              ? 'Model sees more yes-probability than the market'
-              : edge < 0
-              ? 'Model sees less yes-probability than the market'
-              : 'Model and market agree'}
-          </CardDescription>
+        <CardContent className="flex items-center gap-2">
+          <EdgeBadge edge={edge} className="text-body px-3 py-1" />
         </CardContent>
       </Card>
     </div>
